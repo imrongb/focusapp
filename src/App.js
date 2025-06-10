@@ -1,26 +1,23 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
-import { getFirestore, collection, addDoc, query, onSnapshot, doc, setDoc, deleteDoc, serverTimestamp, Timestamp, setLogLevel } from 'firebase/firestore'; // Added deleteDoc
 import { Play, Pause, StopCircle, ListChecks, Clock, CheckCircle2, XCircle, Edit3, Trash2, Save, AlertTriangle } from 'lucide-react';
 
-// --- Firebase Configuration ---
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { apiKey: "YOUR_API_KEY", authDomain: "YOUR_AUTH_DOMAIN", projectId: "YOUR_PROJECT_ID" };
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-focus-app';
+// --- LocalStorage Configuration ---
+const LOCAL_STORAGE_KEY = 'focus-tracker-sessions';
 
-// --- Initialize Firebase ---
-let app;
-let auth;
-let db;
+// --- LocalStorage Helper Functions ---
+const saveSessions = (sessions) => {
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(sessions));
+};
 
-try {
-    app = initializeApp(firebaseConfig);
-    auth = getAuth(app);
-    db = getFirestore(app);
-    // setLogLevel('debug'); // Uncomment for Firebase debugging
-} catch (error) {
-    console.error("Error initializing Firebase:", error);
-}
+const loadSessions = () => {
+    try {
+        const savedSessions = localStorage.getItem(LOCAL_STORAGE_KEY);
+        return savedSessions ? JSON.parse(savedSessions) : [];
+    } catch (error) {
+        console.error("Error loading sessions from localStorage:", error);
+        return [];
+    }
+};
 
 // --- Helper Functions ---
 const formatTime = (totalSeconds) => {
@@ -30,10 +27,38 @@ const formatTime = (totalSeconds) => {
     return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 };
 
+// Simple timestamp class to replace Firebase's Timestamp
+class LocalTimestamp {
+    constructor(date) {
+        this._date = date || new Date();
+    }
+    
+    toDate() {
+        return new Date(this._date);
+    }
+    
+    toMillis() {
+        return this.toDate().getTime();
+    }
+    
+    static now() {
+        return new LocalTimestamp(new Date());
+    }
+    
+    static fromDate(date) {
+        return new LocalTimestamp(date);
+    }
+    
+    // For serialization to JSON
+    toJSON() {
+        return { _date: this._date.toISOString() };
+    }
+};
+
 const FocusSessionItem = ({ session, onDeleteRequest, onEditSession, isEditing, editingText, setEditingText, onSaveEdit }) => {
     const duration = session.durationSeconds ? formatTime(session.durationSeconds) : 'N/A';
-    const startTime = session.startTime instanceof Timestamp ? session.startTime.toDate().toLocaleString() : 'N/A';
-    const endTime = session.endTime instanceof Timestamp ? session.endTime.toDate().toLocaleString() : 'N/A';
+    const startTime = session.startTime && session.startTime._date ? new Date(session.startTime._date).toLocaleString() : 'N/A';
+    const endTime = session.endTime && session.endTime._date ? new Date(session.endTime._date).toLocaleString() : 'N/A';
 
     return (
         <li className="bg-white p-4 rounded-lg shadow hover:shadow-md transition-shadow duration-200 ease-in-out mb-3 text-gray-800">
@@ -103,9 +128,6 @@ const App = () => {
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState(null);
 
-    const [userId, setUserId] = useState(null);
-    const [authReady, setAuthReady] = useState(false);
-
     const timerRef = useRef(null);
     const sessionStartTimeRef = useRef(null);
 
@@ -146,71 +168,26 @@ const App = () => {
     }, []);
 
 
-    // --- Firebase Authentication Effect ---
+    // --- LocalStorage Data Loading Effect ---
     useEffect(() => {
-        if (!auth) {
-            setError("Firebase authentication is not available.");
+        try {
+            const savedSessions = loadSessions();
+            
+            // Sort sessions by start time descending (newest first)
+            savedSessions.sort((a, b) => {
+                const timeA = a.startTime && a.startTime._date ? new Date(a.startTime._date).getTime() : 0;
+                const timeB = b.startTime && b.startTime._date ? new Date(b.startTime._date).getTime() : 0;
+                return timeB - timeA;
+            });
+            
+            setSessions(savedSessions);
             setIsLoading(false);
-            setAuthReady(true);
-            return;
+        } catch (err) {
+            console.error("Error loading sessions from localStorage:", err);
+            setError("Failed to load saved sessions. Local storage might not be available.");
+            setIsLoading(false);
         }
-        const unsubscribe = onAuthStateChanged(auth, async (user) => {
-            if (user) {
-                setUserId(user.uid);
-            } else {
-                try {
-                    const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-                    if (token) {
-                        await signInWithCustomToken(auth, token);
-                    } else {
-                        await signInAnonymously(auth);
-                    }
-                } catch (authError) {
-                    console.error("Error during sign-in:", authError);
-                    setError("Could not sign in. Some features might be unavailable.");
-                }
-            }
-            setAuthReady(true);
-        });
-        return () => unsubscribe();
     }, []);
-
-
-    // --- Firestore Data Fetching Effect ---
-    useEffect(() => {
-        if (!authReady || !userId || !db) {
-            if (authReady && !userId) setIsLoading(false);
-            return;
-        }
-
-        setIsLoading(true);
-        const sessionsCollectionPath = `artifacts/${appId}/users/${userId}/completedSessions`;
-        const q = query(collection(db, sessionsCollectionPath)); // Removed orderBy
-
-        const unsubscribe = onSnapshot(q, (querySnapshot) => {
-            const fetchedSessions = [];
-            querySnapshot.forEach((doc) => {
-                fetchedSessions.push({ id: doc.id, ...doc.data() });
-            });
-
-            // Sort in JavaScript
-            fetchedSessions.sort((a, b) => {
-                const timeA = a.startTime instanceof Timestamp ? a.startTime.toMillis() : 0;
-                const timeB = b.startTime instanceof Timestamp ? b.startTime.toMillis() : 0;
-                return timeB - timeA; // For descending order (newest first)
-            });
-
-            setSessions(fetchedSessions);
-            setIsLoading(false);
-            setError(null);
-        }, (err) => {
-            console.error("Error fetching sessions:", err);
-            setError("Failed to load sessions. Please try again later.");
-            setIsLoading(false);
-        });
-
-        return () => unsubscribe();
-    }, [authReady, userId]);
 
 
     // --- Timer Effect ---
@@ -243,38 +220,33 @@ const App = () => {
         setIsPaused(!isPaused);
     }, [isPaused]);
 
-    const handleEndSession = useCallback(async () => {
-        if (!authReady || !userId || !db) {
-            setError("Cannot save session: Not connected to the database.");
-            setIsActive(false);
-            setIsPaused(false);
-            clearInterval(timerRef.current);
-            return;
-        }
-
+    const handleEndSession = useCallback(() => {
         setIsActive(false);
         setIsPaused(false);
         clearInterval(timerRef.current);
 
         const sessionData = {
+            id: `session-${Date.now()}`, // Generate a unique ID
             taskName: taskName.trim() || "Untitled Session",
-            startTime: Timestamp.fromDate(sessionStartTimeRef.current),
-            endTime: serverTimestamp(),
+            startTime: LocalTimestamp.fromDate(sessionStartTimeRef.current),
+            endTime: LocalTimestamp.now(),
             durationSeconds: timeElapsed,
-            userId: userId,
         };
 
         try {
-            const sessionsCollectionPath = `artifacts/${appId}/users/${userId}/completedSessions`;
-            await addDoc(collection(db, sessionsCollectionPath), sessionData);
+            // Add new session to the current sessions list
+            const updatedSessions = [sessionData, ...sessions];
+            setSessions(updatedSessions);
+            saveSessions(updatedSessions);
+            
             setTaskName('');
             setTimeElapsed(0);
-            setError(null); // Clear any previous errors on success
+            setError(null);
         } catch (e) {
-            console.error("Error adding document: ", e);
-            setError("Failed to save session. Please check your connection and try again.");
+            console.error("Error saving session: ", e);
+            setError("Failed to save session to local storage.");
         }
-    }, [taskName, timeElapsed, userId, authReady]);
+    }, [taskName, timeElapsed, sessions]);
 
     const handleDeleteRequest = (sessionId) => {
         setSessionToDelete(sessionId);
@@ -287,22 +259,25 @@ const App = () => {
         setSessionToDelete(null);
     };
 
-    const confirmDeleteSession = async () => {
-        if (!sessionToDelete || !authReady || !userId || !db) {
-            setError("Cannot delete session: Not connected or session not specified.");
+    const confirmDeleteSession = () => {
+        if (!sessionToDelete) {
+            setError("Cannot delete session: Session not specified.");
             setShowDeleteConfirm(false);
             setSessionToDelete(null);
             return;
         }
+        
         try {
-            const sessionDocPath = `artifacts/${appId}/users/${userId}/completedSessions/${sessionToDelete}`;
-            await deleteDoc(doc(db, sessionDocPath));
+            const updatedSessions = sessions.filter(session => session.id !== sessionToDelete);
+            setSessions(updatedSessions);
+            saveSessions(updatedSessions);
+            
             setShowDeleteConfirm(false);
             setSessionToDelete(null);
             setError(null); // Clear any previous errors on success
         } catch (e) {
-            console.error("Error deleting document: ", e);
-            setError("Failed to delete session.");
+            console.error("Error deleting session: ", e);
+            setError("Failed to delete session from local storage.");
             setShowDeleteConfirm(false); // Still hide confirm dialog on error
             setSessionToDelete(null);
         }
@@ -314,28 +289,32 @@ const App = () => {
         setError(null);
     };
 
-    const handleSaveEdit = async (sessionId) => {
-        if (!authReady || !userId || !db) {
-             setError("Cannot update session: Not connected.");
-             return;
-        }
+    const handleSaveEdit = (sessionId) => {
         if (!editingTaskName.trim()) {
             setError("Task name cannot be empty.");
             return;
         }
+        
         try {
-            const sessionDocPath = `artifacts/${appId}/users/${userId}/completedSessions/${sessionId}`;
-            await setDoc(doc(db, sessionDocPath), { taskName: editingTaskName.trim() }, { merge: true });
+            const updatedSessions = sessions.map(session => 
+                session.id === sessionId 
+                    ? { ...session, taskName: editingTaskName.trim() } 
+                    : session
+            );
+            
+            setSessions(updatedSessions);
+            saveSessions(updatedSessions);
+            
             setEditingSessionId(null);
             setEditingTaskName('');
             setError(null);
         } catch (e) {
-            console.error("Error updating document: ", e);
-            setError("Failed to update session name.");
+            console.error("Error updating session: ", e);
+            setError("Failed to update session name in local storage.");
         }
     };
 
-    if (!authReady && isLoading) {
+    if (isLoading) {
         return (
             <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-700 flex flex-col items-center justify-center p-4 text-white font-sans">
                 <div className="animate-pulse text-2xl">Loading Focus App...</div>
@@ -347,7 +326,7 @@ const App = () => {
         <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-700 flex flex-col items-center p-4 sm:p-6 md:p-8 text-white font-sans">
             <header className="w-full max-w-3xl mb-8 text-center">
                 <h1 className="text-4xl sm:text-5xl font-bold tracking-tight">Focus Tracker</h1>
-                {userId && <p className="text-xs text-slate-400 mt-1">User ID: {userId}</p>}
+                <p className="text-xs text-slate-400 mt-1">Local Storage Version</p>
             </header>
 
             {error && (
@@ -402,8 +381,7 @@ const App = () => {
                             />
                             <button
                                 onClick={handleStartSession}
-                                disabled={!authReady || (authReady && !userId)} // Disable if auth not ready or no user
-                                className="w-full flex items-center justify-center p-3 bg-green-500 hover:bg-green-600 disabled:bg-green-700 disabled:opacity-50 text-white font-semibold rounded-md transition-all duration-200 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-opacity-75 shadow-md"
+                                className="w-full flex items-center justify-center p-3 bg-green-500 hover:bg-green-600 text-white font-semibold rounded-md transition-all duration-200 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-opacity-75 shadow-md"
                             >
                                 <Play size={20} className="mr-2" /> Start Focus
                             </button>
