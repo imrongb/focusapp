@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Pause, StopCircle, ListChecks, Clock, CheckCircle2, XCircle, Edit3, Trash2, Save, AlertTriangle } from 'lucide-react';
+import { Play, Pause, StopCircle, ListChecks, Clock, CheckCircle2, XCircle, Edit3, Trash2, Save, AlertTriangle, Bell, Volume2, VolumeX, Timer } from 'lucide-react';
 
 // --- LocalStorage Configuration ---
 const LOCAL_STORAGE_KEY = 'focus-tracker-sessions';
@@ -59,6 +59,10 @@ const FocusSessionItem = ({ session, onDeleteRequest, onEditSession, isEditing, 
     const duration = session.durationSeconds ? formatTime(session.durationSeconds) : 'N/A';
     const startTime = session.startTime && session.startTime._date ? new Date(session.startTime._date).toLocaleString() : 'N/A';
     const endTime = session.endTime && session.endTime._date ? new Date(session.endTime._date).toLocaleString() : 'N/A';
+    
+    // Format timer information if a timer was used
+    const timerInfo = session.timerUsed ? 
+        `${Math.floor(session.timerDuration / 60)} min timer ${session.timerCompleted ? 'completed' : 'used'}` : null;
 
     return (
         <li className="bg-white p-4 rounded-lg shadow hover:shadow-md transition-shadow duration-200 ease-in-out mb-3 text-gray-800">
@@ -110,6 +114,13 @@ const FocusSessionItem = ({ session, onDeleteRequest, onEditSession, isEditing, 
                     <p className="text-sm text-gray-600 mt-1">
                         <Clock size={14} className="inline mr-1" /> Duration: {duration}
                     </p>
+                    {timerInfo && (
+                        <p className="text-xs mt-1 text-blue-600 flex items-center">
+                            <Timer size={12} className="inline mr-1" />
+                            {timerInfo}
+                            {session.timerCompleted && <Bell size={12} className="ml-1 text-green-600" />}
+                        </p>
+                    )}
                     <p className="text-xs text-gray-500 mt-1">Started: {startTime}</p>
                     <p className="text-xs text-gray-500">Ended: {endTime}</p>
                 </>
@@ -127,9 +138,27 @@ const App = () => {
     const [sessions, setSessions] = useState([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState(null);
+    
+    // Timer settings
+    const [timerDuration, setTimerDuration] = useState(25 * 60); // Default 25 minutes in seconds
+    const [customTimerActive, setCustomTimerActive] = useState(false);
+    const [timeRemaining, setTimeRemaining] = useState(0);
+    
+    // Sound settings
+    const [soundEnabled, setSoundEnabled] = useState(true);
+    const [selectedSound, setSelectedSound] = useState('bell.mp3');
+    const [showTimerSettings, setShowTimerSettings] = useState(false);
+    
+    // Available sounds
+    const availableSounds = [
+        { id: 'bell.mp3', name: 'Bell' },
+        { id: 'chime.mp3', name: 'Chime' },
+        { id: 'complete.mp3', name: 'Complete' }
+    ];
 
     const timerRef = useRef(null);
     const sessionStartTimeRef = useRef(null);
+    const audioRef = useRef(null);
 
     const [editingSessionId, setEditingSessionId] = useState(null);
     const [editingTaskName, setEditingTaskName] = useState('');
@@ -168,9 +197,10 @@ const App = () => {
     }, []);
 
 
-    // --- LocalStorage Data Loading Effect ---
+    // --- LocalStorage Data & Settings Loading Effect ---
     useEffect(() => {
         try {
+            // Load sessions
             const savedSessions = loadSessions();
             
             // Sort sessions by start time descending (newest first)
@@ -181,26 +211,79 @@ const App = () => {
             });
             
             setSessions(savedSessions);
+            
+            // Load timer settings
+            const savedTimerDuration = localStorage.getItem('focus-timer-duration');
+            if (savedTimerDuration) {
+                setTimerDuration(parseInt(savedTimerDuration, 10));
+            }
+            
+            // Load sound settings
+            const savedSoundEnabled = localStorage.getItem('focus-sound-enabled');
+            if (savedSoundEnabled !== null) {
+                setSoundEnabled(savedSoundEnabled === 'true');
+            }
+            
+            const savedSelectedSound = localStorage.getItem('focus-selected-sound');
+            if (savedSelectedSound) {
+                setSelectedSound(savedSelectedSound);
+            }
+            
             setIsLoading(false);
         } catch (err) {
-            console.error("Error loading sessions from localStorage:", err);
-            setError("Failed to load saved sessions. Local storage might not be available.");
+            console.error("Error loading data from localStorage:", err);
+            setError("Failed to load saved data. Local storage might not be available.");
             setIsLoading(false);
         }
     }, []);
 
+
+    // --- Audio Element Effect ---
+    useEffect(() => {
+        // Create audio element when component mounts
+        audioRef.current = new Audio(`${process.env.PUBLIC_URL}/sounds/${selectedSound}`);
+        
+        return () => {
+            // Clean up audio element when component unmounts
+            if (audioRef.current) {
+                audioRef.current.pause();
+                audioRef.current = null;
+            }
+        };
+    }, [selectedSound]);
 
     // --- Timer Effect ---
     useEffect(() => {
         if (isActive && !isPaused) {
             timerRef.current = setInterval(() => {
                 setTimeElapsed(prevTime => prevTime + 1);
+                
+                // If custom timer is active, update the time remaining
+                if (customTimerActive) {
+                    setTimeRemaining(prev => {
+                        const newTimeRemaining = prev - 1;
+                        
+                        // Check if timer has reached zero
+                        if (newTimeRemaining <= 0) {
+                            // Play sound notification if enabled
+                            if (soundEnabled && audioRef.current) {
+                                audioRef.current.play().catch(error => {
+                                    console.error("Error playing sound:", error);
+                                });
+                            }
+                            
+                            return 0;
+                        }
+                        
+                        return newTimeRemaining;
+                    });
+                }
             }, 1000);
         } else {
             clearInterval(timerRef.current);
         }
         return () => clearInterval(timerRef.current);
-    }, [isActive, isPaused]);
+    }, [isActive, isPaused, customTimerActive, soundEnabled]);
 
 
     // --- Event Handlers ---
@@ -210,12 +293,25 @@ const App = () => {
             setError("Please enter a task name to start a session.");
             return;
         }
+        
         setIsActive(true);
         setIsPaused(false);
         setTimeElapsed(0);
         sessionStartTimeRef.current = new Date();
-    }, [taskName]);
+        
+        // If timer is enabled, set up the countdown
+        if (customTimerActive) {
+            setTimeRemaining(timerDuration);
+        }
+    }, [taskName, customTimerActive, timerDuration]);
 
+    // Save settings to localStorage
+    const saveSettings = useCallback(() => {
+        localStorage.setItem('focus-timer-duration', timerDuration.toString());
+        localStorage.setItem('focus-sound-enabled', soundEnabled.toString());
+        localStorage.setItem('focus-selected-sound', selectedSound);
+    }, [timerDuration, soundEnabled, selectedSound]);
+    
     const handlePauseResumeSession = useCallback(() => {
         setIsPaused(!isPaused);
     }, [isPaused]);
@@ -225,12 +321,23 @@ const App = () => {
         setIsPaused(false);
         clearInterval(timerRef.current);
 
+        // Play completion sound if enabled
+        if (soundEnabled && audioRef.current) {
+            audioRef.current.play().catch(error => {
+                console.error("Error playing sound:", error);
+            });
+        }
+
         const sessionData = {
             id: `session-${Date.now()}`, // Generate a unique ID
             taskName: taskName.trim() || "Untitled Session",
             startTime: LocalTimestamp.fromDate(sessionStartTimeRef.current),
             endTime: LocalTimestamp.now(),
             durationSeconds: timeElapsed,
+            // Save timer settings with the session
+            timerUsed: customTimerActive,
+            timerDuration: customTimerActive ? timerDuration : null,
+            timerCompleted: customTimerActive && timeRemaining === 0
         };
 
         try {
@@ -241,12 +348,13 @@ const App = () => {
             
             setTaskName('');
             setTimeElapsed(0);
+            setTimeRemaining(0);
             setError(null);
         } catch (e) {
             console.error("Error saving session: ", e);
             setError("Failed to save session to local storage.");
         }
-    }, [taskName, timeElapsed, sessions]);
+    }, [taskName, timeElapsed, sessions, customTimerActive, timerDuration, timeRemaining, soundEnabled]);
 
     const handleDeleteRequest = (sessionId) => {
         setSessionToDelete(sessionId);
@@ -364,9 +472,36 @@ const App = () => {
                 <section aria-labelledby="timer-heading">
                     <h2 id="timer-heading" className="sr-only">Focus Timer</h2>
                     <div className="text-center mb-6">
+                        {/* Main Timer Display */}
                         <div className={`text-6xl sm:text-7xl font-mono p-4 rounded-lg inline-block transition-all duration-300 ease-in-out ${isActive && !isPaused ? 'text-green-400 animate-pulse' : isPaused ? 'text-yellow-400' : 'text-slate-300'}`}>
                             {formatTime(timeElapsed)}
                         </div>
+                        
+                        {/* Countdown Timer (if enabled) */}
+                        {isActive && customTimerActive && timeRemaining > 0 && (
+                            <div className="mt-2">
+                                <div className="flex items-center justify-center gap-2">
+                                    <Timer size={16} className="text-blue-400" />
+                                    <p className={`font-mono ${timeRemaining < 60 ? 'text-red-400' : 'text-blue-400'}`}>
+                                        {formatTime(timeRemaining)} remaining
+                                    </p>
+                                </div>
+                                <div className="w-full bg-slate-700 rounded-full h-1.5 mt-2">
+                                    <div 
+                                        className="bg-blue-500 h-1.5 rounded-full transition-all duration-1000 ease-linear"
+                                        style={{ width: `${(timeRemaining / timerDuration) * 100}%` }}
+                                    ></div>
+                                </div>
+                            </div>
+                        )}
+                        
+                        {/* Timer Finished Notification */}
+                        {isActive && customTimerActive && timeRemaining === 0 && (
+                            <div className="mt-3 text-red-400 animate-pulse flex items-center justify-center">
+                                <Bell size={16} className="mr-1" />
+                                <span>Timer complete!</span>
+                            </div>
+                        )}
                     </div>
 
                     {!isActive ? (
@@ -379,6 +514,101 @@ const App = () => {
                                 className="w-full p-3 bg-slate-700 border border-slate-600 rounded-md placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-colors text-white"
                                 aria-label="Task name"
                             />
+                            
+                            {/* Timer Settings Toggle */}
+                            <div className="flex justify-between items-center">
+                                <button 
+                                    onClick={() => setShowTimerSettings(!showTimerSettings)}
+                                    className="flex items-center text-slate-300 hover:text-white transition-colors"
+                                >
+                                    <Timer size={18} className="mr-1" />
+                                    <span>Timer Settings</span>
+                                </button>
+                                
+                                <button 
+                                    onClick={() => {
+                                        setSoundEnabled(!soundEnabled);
+                                        saveSettings();
+                                    }}
+                                    className="flex items-center text-slate-300 hover:text-white transition-colors"
+                                    aria-label={soundEnabled ? "Disable sound" : "Enable sound"}
+                                >
+                                    {soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+                                </button>
+                            </div>
+                            
+                            {/* Timer Settings Panel */}
+                            {showTimerSettings && (
+                                <div className="bg-slate-700 p-4 rounded-lg space-y-4">
+                                    <div className="flex items-center justify-between">
+                                        <label htmlFor="use-timer" className="text-slate-300">Use Timer</label>
+                                        <div className="relative inline-block w-12 h-6 transition duration-200 ease-in-out rounded-full">
+                                            <input
+                                                type="checkbox"
+                                                id="use-timer"
+                                                className="absolute w-6 h-6 transition duration-200 ease-in-out transform bg-white rounded-full appearance-none cursor-pointer peer checked:translate-x-6 checked:bg-blue-500"
+                                                checked={customTimerActive}
+                                                onChange={() => setCustomTimerActive(!customTimerActive)}
+                                            />
+                                            <label
+                                                htmlFor="use-timer"
+                                                className="block w-full h-full overflow-hidden rounded-full cursor-pointer bg-slate-600 peer-checked:bg-blue-300"
+                                            ></label>
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="space-y-2">
+                                        <label htmlFor="timer-duration" className="text-slate-300">
+                                            Focus Duration: {Math.floor(timerDuration / 60)} minutes
+                                        </label>
+                                        <input
+                                            type="range"
+                                            id="timer-duration"
+                                            min="5"
+                                            max="120"
+                                            step="5"
+                                            value={timerDuration / 60}
+                                            onChange={(e) => {
+                                                const mins = parseInt(e.target.value, 10);
+                                                setTimerDuration(mins * 60);
+                                                saveSettings();
+                                            }}
+                                            className="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer"
+                                        />
+                                    </div>
+                                    
+                                    <div className="space-y-2">
+                                        <label className="text-slate-300">Notification Sound</label>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            {availableSounds.map(sound => (
+                                                <button
+                                                    key={sound.id}
+                                                    onClick={() => {
+                                                        setSelectedSound(sound.id);
+                                                        saveSettings();
+                                                        
+                                                        // Preview the sound
+                                                        if (soundEnabled && audioRef.current) {
+                                                            audioRef.current.pause();
+                                                            audioRef.current.currentTime = 0;
+                                                            audioRef.current.src = `${process.env.PUBLIC_URL}/sounds/${sound.id}`;
+                                                            audioRef.current.play().catch(e => console.error("Error playing sound:", e));
+                                                        }
+                                                    }}
+                                                    className={`p-2 rounded-md flex items-center justify-center 
+                                                        ${selectedSound === sound.id 
+                                                            ? 'bg-blue-500 text-white' 
+                                                            : 'bg-slate-600 text-slate-300 hover:bg-slate-500'}`}
+                                                >
+                                                    <Bell size={14} className="mr-1" />
+                                                    {sound.name}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                            
                             <button
                                 onClick={handleStartSession}
                                 className="w-full flex items-center justify-center p-3 bg-green-500 hover:bg-green-600 text-white font-semibold rounded-md transition-all duration-200 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-opacity-75 shadow-md"
